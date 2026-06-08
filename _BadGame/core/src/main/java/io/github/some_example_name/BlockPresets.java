@@ -9,13 +9,20 @@ public class BlockPresets {
     }
 
     public static Color newColor() {
+        // Array now contains a broader depth of secondary/tertiary colors
         Color[] colors = {
-            new Color(255, 0, 0),
-            new Color(0, 255, 0),
-            new Color(255, 0, 255),
-            new Color(0, 0, 255),
+            new Color(255, 0, 0),     // 0: Red
+            new Color(0, 255, 0),     // 1: Green
+            new Color(0, 0, 255),     // 2: Blue
+            new Color(255, 255, 0),   // 3: Yellow (Unlocked at 100 pts)
+            new Color(255, 0, 255),   // 4: Purple (Unlocked at 300 pts)
+            new Color(0, 255, 255),   // 5: Cyan   (Unlocked at 600 pts)
+            new Color(255, 128, 0)    // 6: Orange (Unlocked at 600 pts)
         };
-        return colors[(int) (Math.random() * colors.length)];
+        
+        // Bounds check to ensure index never out-scales the color palette length
+        int maxRange = Math.min(Main.currentMaxColors, colors.length);
+        return colors[(int) (Math.random() * maxRange)];
     }
 
     // 2. Function to pick a random shape name
