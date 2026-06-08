@@ -28,6 +28,12 @@ import com.badlogic.gdx.utils.ScreenUtils;
 import com.badlogic.gdx.utils.viewport.FitViewport;
 
 public class Main extends ApplicationAdapter {
+    // --- PATHFINDING OPTIMIZATION VARIABLES ---
+    private static final int TOTAL_CELLS = 500 * 600; // WIDTH * HEIGHT
+    private static boolean[] visited = new boolean[TOTAL_CELLS];
+    private static int[] parentMap = new int[TOTAL_CELLS];
+    private static boolean[] blobVisited = new boolean[TOTAL_CELLS];
+    private float lineCheckTimer = 0f;
     public static int WIDTH = 500;
     public static int HEIGHT = 600;
 
@@ -55,13 +61,20 @@ public class Main extends ApplicationAdapter {
     private float timer2 = 0f;
     private final float tickRate = 0.016f; 
 
+    // --- MOVEMENT VARIABLES (DAS/ARR) ---
+    private float dasTimer = 0f;
+    private float arrTimer = 0f;
+    private int currentDir = 0;
+    private final float DAS_DELAY = 0.15f; 
+    private final float ARR_RATE = 0.02f;  
+
     public static boolean pieceActive = false;
     public static boolean collisionDetectedThisFrame = false;
     private BlockPresets.Shape queuedShape;
     private java.awt.Color queuedColor;
     private static boolean gameOverTriggered = false;
 
-    // --- NEW: MENU & STATE VARIABLES ---
+    // --- MENU & STATE VARIABLES ---
     private enum GameState { MENU, PLAYING }
     private GameState currentState = GameState.MENU;
     private Preferences prefs;
@@ -85,9 +98,7 @@ public class Main extends ApplicationAdapter {
         scoreLabel.setText("SCORE: 0");
     }
 
-    // --- NEW: HANDLE GAME OVER LOGIC ---
     private void handleGameOver() {
-        // Save new high score if achieved
         if (score > bestScore) {
             bestScore = score;
             prefs.putInteger("bestScore", bestScore);
@@ -97,7 +108,6 @@ public class Main extends ApplicationAdapter {
         
         restartGame();
         
-        // Switch states
         currentState = GameState.MENU;
         gameTable.setVisible(false);
         menuTable.setVisible(true);
@@ -112,7 +122,6 @@ public class Main extends ApplicationAdapter {
         stage = new Stage(new FitViewport(UI_WIDTH, UI_HEIGHT));
         Gdx.input.setInputProcessor(stage);
 
-        // Load Persistent Preferences
         prefs = Gdx.app.getPreferences("SandTetrisPrefs");
         bestScore = prefs.getInteger("bestScore", 0);
 
@@ -121,17 +130,9 @@ public class Main extends ApplicationAdapter {
         backgroundImage.setFillParent(true); 
         stage.addActor(backgroundImage); 
 
-        try {
-            clickSound = Gdx.audio.newSound(Gdx.files.internal("fart.mp3"));
-        } catch (Exception e) {
-            clickSound = new EmptySound();
-        }
-
-        try {
-            clearSound = Gdx.audio.newSound(Gdx.files.internal("clear.wav"));
-        } catch (Exception e) {
-            clearSound = new EmptySound();
-        }
+        // Load sounds safely
+        try { clickSound = Gdx.audio.newSound(Gdx.files.internal("fart.mp3")); } catch (Exception e) {}
+        try { clearSound = Gdx.audio.newSound(Gdx.files.internal("clear.wav")); } catch (Exception e) {}
         
         font = new BitmapFont(); 
         font.getData().setScale(2.0f); 
@@ -151,7 +152,7 @@ public class Main extends ApplicationAdapter {
         menuTable.setFillParent(true);
         stage.addActor(menuTable);
 
-        // 1. Setup Game UI (Moved your previous rootTable logic here)
+        // Game UI
         Image sandGameWidget = new Image(texture);
         gameTable.center();
         gameTable.add(sandGameWidget).size(WIDTH, HEIGHT).pad(20);
@@ -166,12 +167,11 @@ public class Main extends ApplicationAdapter {
         sidePanel.add(nextShapeImage).size(PREVIEW_SIZE, PREVIEW_SIZE).padTop(10).center();
         gameTable.add(sidePanel).width(UI_WIDTH - WIDTH - 40).fillY().top();
 
-        // 2. Setup Menu UI
+        // Menu UI
         Label titleLabel = new Label("SAND TETRIS", labelStyle);
         titleLabel.setFontScale(3.0f);
         bestScoreLabel = new Label("BEST SCORE: " + bestScore, labelStyle);
         
-        // Generate a visual block for the Play Button without needing external files
         btnPixmap = new Pixmap(1, 1, Pixmap.Format.RGBA8888);
         btnPixmap.setColor(new Color(0.2f, 0.8f, 0.2f, 1f));
         btnPixmap.fill();
@@ -195,11 +195,9 @@ public class Main extends ApplicationAdapter {
         menuTable.add(playButton).size(200, 60).padBottom(30).row();
         menuTable.add(bestScoreLabel);
 
-        // Start by showing the Menu
         menuTable.setVisible(true);
         gameTable.setVisible(false);
 
-        // Generate the very first shape
         queuedShape = BlockPresets.getRandomShape();
         queuedColor = BlockPresets.newColor();
         setNextShapePreview(queuedShape, queuedColor);
@@ -259,17 +257,12 @@ public class Main extends ApplicationAdapter {
             }
         }
 
-        // --- GAME LOGIC (ONLY RUNS IF PLAYING) ---
         if (currentState == GameState.PLAYING) {
             
-            if (Gdx.input.isKeyPressed(Input.Keys.A) || Gdx.input.isKeyPressed(Input.Keys.LEFT)) {
-                moveActivePiece(-3); 
-            }
-            if (Gdx.input.isKeyPressed(Input.Keys.D) || Gdx.input.isKeyPressed(Input.Keys.RIGHT)) {
-                moveActivePiece(3);
-            }
-            
-            if (!isPieceActive()) {
+            // 1. ALWAYS check for completed lines
+            lineCheckTimer += Gdx.graphics.getDeltaTime();
+            if (lineCheckTimer >= 0.2f) {
+                lineCheckTimer = 0f; // Reset timer
                 List<Integer> bridgeBlob = getFullBridgeBlob();
                 if (bridgeBlob != null) {
                     score += bridgeBlob.size(); 
@@ -279,11 +272,45 @@ public class Main extends ApplicationAdapter {
                         int by = index / WIDTH;
                         grid[bx][by] = null;
                     }
-                    clearSound.play();
+                    if (clearSound != null) clearSound.play();
                 }
+            }
 
+            // 2. Handle Player Input (DAS / Smooth Holding)
+            int inputDir = 0;
+            if (Gdx.input.isKeyJustPressed(Input.Keys.W) || Gdx.input.isKeyJustPressed(Input.Keys.UP)) {
+                rotateActivePiece();
+            }
+            if (Gdx.input.isKeyPressed(Input.Keys.A) || Gdx.input.isKeyPressed(Input.Keys.LEFT)) {
+                inputDir = -1;
+            } else if (Gdx.input.isKeyPressed(Input.Keys.D) || Gdx.input.isKeyPressed(Input.Keys.RIGHT)) {
+                inputDir = 1;
+            }
+
+            if (inputDir != 0) {
+                if (currentDir != inputDir) {
+                    moveActivePiece(inputDir * 4); 
+                    currentDir = inputDir;
+                    dasTimer = 0f;
+                    arrTimer = 0f;
+                } else {
+                    dasTimer += Gdx.graphics.getDeltaTime();
+                    if (dasTimer >= DAS_DELAY) {
+                        arrTimer += Gdx.graphics.getDeltaTime();
+                        if (arrTimer >= ARR_RATE) {
+                            moveActivePiece(inputDir * 4); 
+                            arrTimer = 0f; 
+                        }
+                    }
+                }
+            } else {
+                currentDir = 0; 
+            }
+            
+            // 3. Spawning logic
+            if (!isPieceActive()) {
                 BlockPresets.spawnShape(queuedShape, 12, queuedColor);
-                clickSound.play();
+                if (clickSound != null) clickSound.play();
                 queuedShape = BlockPresets.getRandomShape();
                 queuedColor = BlockPresets.newColor();
                 setNextShapePreview(queuedShape, queuedColor);
@@ -294,6 +321,7 @@ public class Main extends ApplicationAdapter {
                 }
             }
 
+            // 4. Physics Engine
             timer += Gdx.graphics.getDeltaTime();
             timer2 += Gdx.graphics.getDeltaTime();
 
@@ -301,7 +329,7 @@ public class Main extends ApplicationAdapter {
                 int simulationSpeed = 5; 
                 int i2 = 1;
                 
-                boolean isOneSecondTick = (timer2 >= 0.2f) || Gdx.input.isKeyPressed(Input.Keys.S);
+                boolean isOneSecondTick = (timer2 >= 0.2f) || (Gdx.input.isKeyPressed(Input.Keys.S) || Gdx.input.isKeyPressed(Input.Keys.DOWN));
                 
                 for (int i = 0; i < simulationSpeed; i++) {
                     i2 *= -1;
@@ -314,7 +342,7 @@ public class Main extends ApplicationAdapter {
                 }
             }
 
-            // Draw to texture
+            // 5. Draw to texture
             pixmap.setColor(Color.BLACK);
             pixmap.fill(); 
             for (int x = 0; x < WIDTH; x++) {
@@ -328,7 +356,6 @@ public class Main extends ApplicationAdapter {
             texture.draw(pixmap, 0, 0);
         }
 
-        // Draw whichever stage is visible
         stage.act(Gdx.graphics.getDeltaTime());
         stage.draw();
     }
@@ -354,8 +381,10 @@ public class Main extends ApplicationAdapter {
     }
 
     private void moveActivePiece(int dx) {
+        int steps = Math.abs(dx);
+        int sign = dx > 0 ? 1 : -1;
+
         List<int[]> activeParticles = new ArrayList<>();
-        
         for (int x = 0; x < WIDTH; x++) {
             for (int y = 0; y < HEIGHT; y++) {
                 if (grid[x][y] != null && grid[x][y].slowFall) {
@@ -364,25 +393,30 @@ public class Main extends ApplicationAdapter {
             }
         }
 
-        for (int[] p : activeParticles) {
-            int newX = p[0] + dx;
-            int newY = p[1];
-            if (newX < 0 || newX >= WIDTH) return; 
-            if (grid[newX][newY] != null && !grid[newX][newY].slowFall) {
-                return; 
+        for (int s = 0; s < steps; s++) {
+            boolean blocked = false;
+            
+            for (int[] p : activeParticles) {
+                int newX = p[0] + sign;
+                int newY = p[1];
+                if (newX < 0 || newX >= WIDTH) { blocked = true; break; }
+                if (grid[newX][newY] != null && !grid[newX][newY].slowFall) { blocked = true; break; }
             }
-        }
 
-        Sand[] savedSand = new Sand[activeParticles.size()];
-        for (int i = 0; i < activeParticles.size(); i++) {
-            int[] p = activeParticles.get(i);
-            savedSand[i] = grid[p[0]][p[1]];
-            grid[p[0]][p[1]] = null; 
-        }
+            if (blocked) break; 
 
-        for (int i = 0; i < activeParticles.size(); i++) {
-            int[] p = activeParticles.get(i);
-            grid[p[0] + dx][p[1]] = savedSand[i];
+            Sand[] savedSand = new Sand[activeParticles.size()];
+            for (int i = 0; i < activeParticles.size(); i++) {
+                int[] p = activeParticles.get(i);
+                savedSand[i] = grid[p[0]][p[1]];
+                grid[p[0]][p[1]] = null; 
+            }
+
+            for (int i = 0; i < activeParticles.size(); i++) {
+                int[] p = activeParticles.get(i);
+                grid[p[0] + sign][p[1]] = savedSand[i];
+                p[0] += sign; 
+            }
         }
     }
 
@@ -415,7 +449,7 @@ public class Main extends ApplicationAdapter {
             for (int xx = 0; xx < WIDTH; xx++) {
                 int x = xx;
                 if (dir == 1) {
-                   x = WIDTH - xx - 1; 
+                    x = WIDTH - xx - 1; 
                 }
                 
                 if (grid[x][y + 1] != null) { 
@@ -474,10 +508,10 @@ public class Main extends ApplicationAdapter {
     }
 
     public static List<Integer> getFullBridgeBlob() {
-        int totalCells = WIDTH * HEIGHT;
-        boolean[] visited = new boolean[totalCells];
-        int[] parentMap = new int[totalCells];
+        // Quickly wipe the global arrays clean instead of creating new ones
+        Arrays.fill(visited, false);
         Arrays.fill(parentMap, -1);
+        Arrays.fill(blobVisited, false);
 
         List<Integer> starters = new ArrayList<>();
         for (int y = 0; y < HEIGHT; y++) {
@@ -488,6 +522,7 @@ public class Main extends ApplicationAdapter {
 
         int finalBridgeIndex = -1;
         java.awt.Color targetColor = null;
+        int gapTolerance = 20; 
 
         searchLoop:
         for (int startIndex : starters) {
@@ -505,15 +540,13 @@ public class Main extends ApplicationAdapter {
                 int cx = currIndex % WIDTH;
                 int cy = currIndex / WIDTH;
 
-                if (cx == WIDTH - 1) {
+                if (cx >= WIDTH - gapTolerance - 1) {
                     finalBridgeIndex = currIndex;
                     break searchLoop;
                 }
 
-                for (int ox = -1; ox <= 1; ox++) {
-                    for (int oy = -1; oy <= 1; oy++) {
-                        if (ox == 0 && oy == 0) continue;
-
+                for (int ox = 1; ox <= gapTolerance; ox++) { // Start at 1 (always move right)
+                    for (int oy = -gapTolerance; oy <= gapTolerance; oy++) {
                         int nx = cx + ox;
                         int ny = cy + oy;
 
@@ -536,7 +569,6 @@ public class Main extends ApplicationAdapter {
 
         List<Integer> fullBlob = new ArrayList<>();
         Queue<Integer> expansionQueue = new LinkedList<>();
-        boolean[] blobVisited = new boolean[totalCells];
 
         int trace = finalBridgeIndex;
         while (trace != -1) {
@@ -584,5 +616,79 @@ public class Main extends ApplicationAdapter {
         if (font != null) font.dispose();
         if (btnTexture != null) btnTexture.dispose();
         if (btnPixmap != null) btnPixmap.dispose();
+        
+        if (clickSound != null) clickSound.dispose();
+        if (clearSound != null) clearSound.dispose();
+        if (gameoverSound != null) gameoverSound.dispose();
+    }
+    private void rotateActivePiece() {
+        List<int[]> activeParticles = new ArrayList<>();
+        float minX = Float.MAX_VALUE, maxX = Float.MIN_VALUE;
+        float minY = Float.MAX_VALUE, maxY = Float.MIN_VALUE;
+
+        // 1. Gather all falling particles and find their bounding box
+        for (int x = 0; x < WIDTH; x++) {
+            for (int y = 0; y < HEIGHT; y++) {
+                if (grid[x][y] != null && grid[x][y].slowFall) {
+                    activeParticles.add(new int[]{x, y});
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        }
+
+        if (activeParticles.isEmpty()) return;
+
+        // 2. Calculate the center pivot point
+        float cx = (minX + maxX) / 2f;
+        float cy = (minY + maxY) / 2f;
+
+        List<int[]> newPositions = new ArrayList<>();
+        boolean blocked = false;
+
+        // 3. Calculate new rotated coordinates
+        for (int[] p : activeParticles) {
+            // Find position relative to the center
+            float rx = p[0] - cx;
+            float ry = p[1] - cy;
+
+            // Apply 90-degree clockwise rotation math
+            int newX = Math.round(cx + ry);
+            int newY = Math.round(cy - rx);
+
+            // Check bounds (don't rotate out of the screen)
+            if (newX < 0 || newX >= WIDTH || newY < 0 || newY >= HEIGHT) {
+                blocked = true; 
+                break;
+            }
+            
+            // Check collisions (don't rotate into settled sand)
+            if (grid[newX][newY] != null && !grid[newX][newY].slowFall) {
+                blocked = true; 
+                break;
+            }
+
+            newPositions.add(new int[]{newX, newY});
+        }
+
+        if (blocked) return; // Abort rotation if it doesn't fit
+
+        // 4. Apply the rotation safely
+        Sand[] savedSand = new Sand[activeParticles.size()];
+        
+        // First, clear all old positions from the grid
+        for (int i = 0; i < activeParticles.size(); i++) {
+            int[] p = activeParticles.get(i);
+            savedSand[i] = grid[p[0]][p[1]];
+            grid[p[0]][p[1]] = null; 
+        }
+
+        // Then, stamp them into their new rotated positions
+        for (int i = 0; i < newPositions.size(); i++) {
+            int[] newP = newPositions.get(i);
+            grid[newP[0]][newP[1]] = savedSand[i]; 
+        }
     }
 }
