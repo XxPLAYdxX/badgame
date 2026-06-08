@@ -29,11 +29,14 @@ import com.badlogic.gdx.utils.viewport.FitViewport;
 
 public class Main extends ApplicationAdapter {
     // --- PATHFINDING OPTIMIZATION VARIABLES ---
-    private static final int TOTAL_CELLS = 500 * 600; // WIDTH * HEIGHT
-    private static boolean[] visited = new boolean[TOTAL_CELLS];
+    private static final int TOTAL_CELLS = 500 * 600; 
+    private static int[] visited = new int[TOTAL_CELLS];
+    private static int currentGeneration = 1; 
     private static int[] parentMap = new int[TOTAL_CELLS];
-    private static boolean[] blobVisited = new boolean[TOTAL_CELLS];
+    private static int[] blobVisited = new int[TOTAL_CELLS];
+    private static int blobGeneration = 1;
     private float lineCheckTimer = 0f;
+    
     public static int WIDTH = 500;
     public static int HEIGHT = 600;
 
@@ -55,11 +58,19 @@ public class Main extends ApplicationAdapter {
     private Image nextShapeImage;
     private final int PREVIEW_SIZE = 120; 
     
-    private static Sand[][] grid; 
+    // --- MEMORY OPTIMIZATION: Primitive Arrays ---
+    private static int[][] gridColors; 
+    private static boolean[][] gridActive;
+    
+    // --- CPU OPTIMIZATION: Active Piece Tracker ---
+    private static List<int[]> activeParticles = new ArrayList<>();
 
     private float timer = 0f;
     private float timer2 = 0f;
-    private final float tickRate = 0.016f; 
+    
+    // --- PROGRESSIVE DIFFICULTY VARIABLES ---
+    private float tickRate = 0.016f; 
+    public static int currentMaxColors = 3; 
 
     // --- MOVEMENT VARIABLES (DAS/ARR) ---
     private float dasTimer = 0f;
@@ -88,14 +99,41 @@ public class Main extends ApplicationAdapter {
 
     private Sound clickSound;
     private Sound clearSound;
-    private Sound gameoverSound;
 
     private void restartGame() {
         for (int x = 0; x < WIDTH; x++) {
-            Arrays.fill(grid[x], null);
+            Arrays.fill(gridColors[x], 0);
+            Arrays.fill(gridActive[x], false);
         }
+        activeParticles.clear();
         score = 0;
+        tickRate = 0.016f;
+        currentMaxColors = 3;
         scoreLabel.setText("SCORE: 0");
+        gameOverTriggered = false;
+    }
+
+    private void updateDifficulty() {
+        if (score < 30) {
+            tickRate = 0.016f;
+            currentMaxColors = 3; 
+        } else if (score < 150) {
+            tickRate = 0.012f; 
+            currentMaxColors = 4; 
+        } else if (score < 600) {
+            tickRate = 0.009f; 
+            currentMaxColors = 5; 
+        } else {
+            tickRate = 0.006f; 
+            currentMaxColors = 6; 
+        }
+    }
+
+    private float getDropDelay() {
+        if (score < 100) return 0.20f;
+        if (score < 300) return 0.14f;
+        if (score < 600) return 0.09f;
+        return 0.05f; 
     }
 
     private void handleGameOver() {
@@ -115,7 +153,9 @@ public class Main extends ApplicationAdapter {
 
     @Override
     public void create() {
-        grid = new Sand[WIDTH][HEIGHT];
+        gridColors = new int[WIDTH][HEIGHT];
+        gridActive = new boolean[WIDTH][HEIGHT];
+        
         pixmap = new Pixmap(WIDTH, HEIGHT, Pixmap.Format.RGBA8888);
         texture = new Texture(pixmap);
 
@@ -130,7 +170,6 @@ public class Main extends ApplicationAdapter {
         backgroundImage.setFillParent(true); 
         stage.addActor(backgroundImage); 
 
-        // Load sounds safely
         try { clickSound = Gdx.audio.newSound(Gdx.files.internal("fart.mp3")); } catch (Exception e) {}
         try { clearSound = Gdx.audio.newSound(Gdx.files.internal("clear.wav")); } catch (Exception e) {}
         
@@ -143,7 +182,6 @@ public class Main extends ApplicationAdapter {
         nextTexture = new Texture(nextPixmap);
         nextShapeImage = new Image(nextTexture);
 
-        // --- UI TABLES SETUP ---
         gameTable = new Table();
         gameTable.setFillParent(true);
         stage.addActor(gameTable);
@@ -152,7 +190,6 @@ public class Main extends ApplicationAdapter {
         menuTable.setFillParent(true);
         stage.addActor(menuTable);
 
-        // Game UI
         Image sandGameWidget = new Image(texture);
         gameTable.center();
         gameTable.add(sandGameWidget).size(WIDTH, HEIGHT).pad(20);
@@ -167,7 +204,6 @@ public class Main extends ApplicationAdapter {
         sidePanel.add(nextShapeImage).size(PREVIEW_SIZE, PREVIEW_SIZE).padTop(10).center();
         gameTable.add(sidePanel).width(UI_WIDTH - WIDTH - 40).fillY().top();
 
-        // Menu UI
         Label titleLabel = new Label("SAND TETRIS", labelStyle);
         titleLabel.setFontScale(3.0f);
         bestScoreLabel = new Label("BEST SCORE: " + bestScore, labelStyle);
@@ -259,24 +295,28 @@ public class Main extends ApplicationAdapter {
 
         if (currentState == GameState.PLAYING) {
             
-            // 1. ALWAYS check for completed lines
+            // 1. Line Clear Engine
             lineCheckTimer += Gdx.graphics.getDeltaTime();
             if (lineCheckTimer >= 0.2f) {
-                lineCheckTimer = 0f; // Reset timer
+                lineCheckTimer = 0f;
                 List<Integer> bridgeBlob = getFullBridgeBlob();
                 if (bridgeBlob != null) {
-                    score += bridgeBlob.size(); 
+                    score += 10 + (bridgeBlob.size() / 300); 
                     scoreLabel.setText("SCORE: " + score);
+                    
+                    updateDifficulty(); 
+
                     for (int index : bridgeBlob) {
                         int bx = index % WIDTH;
                         int by = index / WIDTH;
-                        grid[bx][by] = null;
+                        gridColors[bx][by] = 0; 
+                        gridActive[bx][by] = false;
                     }
                     if (clearSound != null) clearSound.play();
                 }
             }
 
-            // 2. Handle Player Input (DAS / Smooth Holding)
+            // 2. Input Parsing
             int inputDir = 0;
             if (Gdx.input.isKeyJustPressed(Input.Keys.W) || Gdx.input.isKeyJustPressed(Input.Keys.UP)) {
                 rotateActivePiece();
@@ -307,8 +347,8 @@ public class Main extends ApplicationAdapter {
                 currentDir = 0; 
             }
             
-            // 3. Spawning logic
-            if (!isPieceActive()) {
+            // 3. Spawning Matrix
+            if (activeParticles.isEmpty()) {
                 BlockPresets.spawnShape(queuedShape, 12, queuedColor);
                 if (clickSound != null) clickSound.play();
                 queuedShape = BlockPresets.getRandomShape();
@@ -321,35 +361,36 @@ public class Main extends ApplicationAdapter {
                 }
             }
 
-            // 4. Physics Engine
+            // 4. Physics Tick Updates
             timer += Gdx.graphics.getDeltaTime();
-            timer2 += Gdx.graphics.getDeltaTime();
-
             if (timer >= tickRate) {
                 int simulationSpeed = 5; 
                 int i2 = 1;
-                
-                boolean isOneSecondTick = (timer2 >= 0.2f) || (Gdx.input.isKeyPressed(Input.Keys.S) || Gdx.input.isKeyPressed(Input.Keys.DOWN));
-                
                 for (int i = 0; i < simulationSpeed; i++) {
                     i2 *= -1;
-                    updateSand(i2, isOneSecondTick);
+                    updateSand(i2);
                 }
                 timer -= tickRate;
-                
-                if (timer2 >= 0.2f) {
-                    timer2 -= 0.2f; 
-                }
             }
 
-            // 5. Draw to texture
+            // Dedicated Controlled Gravity Loop (With Snappy Soft Drop Logic)
+            timer2 += Gdx.graphics.getDeltaTime();
+            boolean isSoftDropping = Gdx.input.isKeyPressed(Input.Keys.S) || Gdx.input.isKeyPressed(Input.Keys.DOWN);
+            float currentDropDelay = isSoftDropping ? 0.015f : getDropDelay();
+            
+            if (timer2 >= currentDropDelay) {
+                // If soft dropping, fall by 8 horizontal grid rows per tick instead of 1
+                moveActivePieceDown(isSoftDropping ? 8 : 1);
+                timer2 = 0f;
+            }
+
+            // 5. Blit Render Screen
             pixmap.setColor(Color.BLACK);
             pixmap.fill(); 
             for (int x = 0; x < WIDTH; x++) {
                 for (int y = 0; y < HEIGHT; y++) {
-                    if (grid[x][y] != null) {
-                        int argb = grid[x][y].color.getRGB();
-                        pixmap.drawPixel(x, HEIGHT - y - 1, (argb << 8) | argb >>> 24);
+                    if (gridColors[x][y] != 0) {
+                        pixmap.drawPixel(x, HEIGHT - y - 1, gridColors[x][y]);
                     }
                 }
             }
@@ -361,37 +402,32 @@ public class Main extends ApplicationAdapter {
     }
 
     public static void newBlock(int X, int Y, int size, java.awt.Color color) {
+        int argb = color.getRGB();
+        int gdxColor = (argb << 8) | argb >>> 24;
+        
         for (int x = -size; x <= size; x++) {
             for (int y = -size; y <= size; y++) {
                 int drawX = X + x;
                 int drawY = Y + y;
 
                 if (drawX >= 0 && drawX < WIDTH && drawY >= 0 && drawY < HEIGHT) {
-                    if (grid[drawX][drawY] != null && !grid[drawX][drawY].slowFall) {
+                    if (gridColors[drawX][drawY] != 0 && !gridActive[drawX][drawY]) {
                         gameOverTriggered = true;
                     }
 
-                    Sand a = new Sand();
-                    a.slowFall = true;
-                    a.color = color;
-                    grid[drawX][drawY] = a;
+                    gridColors[drawX][drawY] = gdxColor;
+                    gridActive[drawX][drawY] = true;
+                    activeParticles.add(new int[]{drawX, drawY});
                 }
             }
         }
     }
 
     private void moveActivePiece(int dx) {
+        if (activeParticles.isEmpty()) return;
+        
         int steps = Math.abs(dx);
         int sign = dx > 0 ? 1 : -1;
-
-        List<int[]> activeParticles = new ArrayList<>();
-        for (int x = 0; x < WIDTH; x++) {
-            for (int y = 0; y < HEIGHT; y++) {
-                if (grid[x][y] != null && grid[x][y].slowFall) {
-                    activeParticles.add(new int[]{x, y});
-                }
-            }
-        }
 
         for (int s = 0; s < steps; s++) {
             boolean blocked = false;
@@ -400,211 +436,206 @@ public class Main extends ApplicationAdapter {
                 int newX = p[0] + sign;
                 int newY = p[1];
                 if (newX < 0 || newX >= WIDTH) { blocked = true; break; }
-                if (grid[newX][newY] != null && !grid[newX][newY].slowFall) { blocked = true; break; }
+                if (gridColors[newX][newY] != 0 && !gridActive[newX][newY]) { blocked = true; break; }
             }
 
             if (blocked) break; 
 
-            Sand[] savedSand = new Sand[activeParticles.size()];
+            int[] savedColors = new int[activeParticles.size()];
             for (int i = 0; i < activeParticles.size(); i++) {
                 int[] p = activeParticles.get(i);
-                savedSand[i] = grid[p[0]][p[1]];
-                grid[p[0]][p[1]] = null; 
+                savedColors[i] = gridColors[p[0]][p[1]];
+                gridColors[p[0]][p[1]] = 0; 
+                gridActive[p[0]][p[1]] = false;
             }
 
             for (int i = 0; i < activeParticles.size(); i++) {
                 int[] p = activeParticles.get(i);
-                grid[p[0] + sign][p[1]] = savedSand[i];
                 p[0] += sign; 
+                gridColors[p[0]][p[1]] = savedColors[i];
+                gridActive[p[0]][p[1]] = true;
             }
         }
     }
 
-    private void updateSand(int dir, boolean onesecond) {
-        boolean shouldDeactivatePiece = false;
-        
-        for (int x = 0; x < WIDTH; x++) {
-            for (int y = 0; y < HEIGHT; y++) {
-                if (grid[x][y] != null && grid[x][y].slowFall) {
-                    if (y == 0 || (grid[x][y - 1] != null && !grid[x][y - 1].slowFall)) {
-                        shouldDeactivatePiece = true;
-                        break;
-                    }
-                }
-            }
-            if (shouldDeactivatePiece) break;
-        }
+    private void moveActivePieceDown(int dy) {
+        if (activeParticles.isEmpty()) return;
 
-        if (shouldDeactivatePiece) {
-            for (int x = 0; x < WIDTH; x++) {
-                for (int y = 0; y < HEIGHT; y++) {
-                    if (grid[x][y] != null && grid[x][y].slowFall) {
-                        grid[x][y].slowFall = false;
-                    }
+        // Perform programmatic sub-stepping loop to handle high velocity descent cleanly
+        for (int s = 0; s < dy; s++) {
+            boolean blocked = false;
+            for (int[] p : activeParticles) {
+                int newX = p[0];
+                int newY = p[1] - 1;
+                if (newY < 0) { blocked = true; break; }
+                if (gridColors[newX][newY] != 0 && !gridActive[newX][newY]) { blocked = true; break; }
+            }
+
+            if (blocked) {
+                for (int[] p : activeParticles) {
+                    gridActive[p[0]][p[1]] = false;
                 }
+                activeParticles.clear();
+                return; // Cease execution loop if tracking block hits an environmental stop
+            }
+
+            int[] savedColors = new int[activeParticles.size()];
+            for (int i = 0; i < activeParticles.size(); i++) {
+                int[] p = activeParticles.get(i);
+                savedColors[i] = gridColors[p[0]][p[1]];
+                gridColors[p[0]][p[1]] = 0;
+                gridActive[p[0]][p[1]] = false;
+            }
+
+            for (int i = 0; i < activeParticles.size(); i++) {
+                int[] p = activeParticles.get(i);
+                p[1] -= 1;
+                gridColors[p[0]][p[1]] = savedColors[i];
+                gridActive[p[0]][p[1]] = true;
             }
         }
+    }
 
+    private void updateSand(int dir) {
         for (int y = 0; y < HEIGHT - 1; y++) {
             for (int xx = 0; xx < WIDTH; xx++) {
                 int x = xx;
-                if (dir == 1) {
-                    x = WIDTH - xx - 1; 
-                }
+                if (dir == 1) { x = WIDTH - xx - 1; }
                 
-                if (grid[x][y + 1] != null) { 
-                    if (grid[x][y + 1].slowFall && !onesecond) {
-                        continue; 
-                    }
+                if (gridColors[x][y + 1] == 0) continue;
+                if (gridActive[x][y + 1]) continue; 
 
-                    if (grid[x][y] == null) {
-                        grid[x][y] = grid[x][y + 1];       
-                        grid[x][y + 1] = null;
-                        
-                        if (y == 0 || (y > 0 && grid[x][y - 1] != null && !grid[x][y - 1].slowFall)) {
-                            grid[x][y].slowFall = false;
+                if (gridColors[x][y] == 0) {
+                    gridColors[x][y] = gridColors[x][y + 1];       
+                    gridColors[x][y + 1] = 0;
+                }
+                else {
+                    boolean canGoLeft = x > 0 && gridColors[x - 1][y] == 0 && !gridActive[x - 1][y];
+                    boolean canGoRight = x < WIDTH - 1 && gridColors[x + 1][y] == 0 && !gridActive[x + 1][y];
+                    
+                    if (canGoLeft && canGoRight) {
+                        if (dir == 1) {
+                            gridColors[x - 1][y] = gridColors[x][y + 1];
+                            gridColors[x][y + 1] = 0;
+                        } else {
+                            gridColors[x + 1][y] = gridColors[x][y + 1];
+                            gridColors[x][y + 1] = 0;
                         }
-                    }
-                    else {
-                        if (!grid[x][y].slowFall) {
-                            grid[x][y + 1].slowFall = false;
-                        }
-                        
-                        if (!grid[x][y + 1].slowFall || onesecond) {
-                            boolean canGoLeft = x > 0 && grid[x - 1][y] == null;
-                            boolean canGoRight = x < WIDTH - 1 && grid[x + 1][y] == null;
-                            
-                            if (canGoLeft) {
-                                grid[x - 1][y] = grid[x][y + 1];
-                                grid[x][y + 1] = null; 
-                                
-                                if (y == 0 || (y > 0 && grid[x - 1][y - 1] != null && !grid[x - 1][y - 1].slowFall)) {
-                                    grid[x - 1][y].slowFall = false;
-                                }
-                            } else if (canGoRight) {
-                                grid[x + 1][y] = grid[x][y + 1];
-                                grid[x][y + 1] = null;
-                                
-                                if (y == 0 || (y > 0 && grid[x + 1][y - 1] != null && !grid[x + 1][y - 1].slowFall)) {
-                                    grid[x + 1][y].slowFall = false;
-                                }
-                            }
-                        }
+                    } else if (canGoLeft) {
+                        gridColors[x - 1][y] = gridColors[x][y + 1];
+                        gridColors[x][y + 1] = 0;
+                    } else if (canGoRight) {
+                        gridColors[x + 1][y] = gridColors[x][y + 1];
+                        gridColors[x][y + 1] = 0;
                     }
                 }
             }
         }
     }
 
-    private boolean isPieceActive() {
-        for (int x = 0; x < WIDTH; x++) {
-            for (int y = 0; y < HEIGHT; y++) {
-                if (grid[x][y] != null && grid[x][y].slowFall) {
-                    return true; 
-                }
-            }
+public static List<Integer> getFullBridgeBlob() {
+    currentGeneration++;
+    blobGeneration++;
+
+    List<Integer> starters = new ArrayList<>();
+    for (int y = 0; y < HEIGHT; y++) {
+        if (gridColors[0][y] != 0 && !gridActive[0][y]) {
+            starters.add(y * WIDTH);
         }
-        return false; 
     }
 
-    public static List<Integer> getFullBridgeBlob() {
-        // Quickly wipe the global arrays clean instead of creating new ones
-        Arrays.fill(visited, false);
-        Arrays.fill(parentMap, -1);
-        Arrays.fill(blobVisited, false);
+    int finalBridgeIndex = -1;
+    int targetColor = 0;
+    int gapTolerance = 20; 
 
-        List<Integer> starters = new ArrayList<>();
-        for (int y = 0; y < HEIGHT; y++) {
-            if (grid[0][y] != null && !grid[0][y].slowFall) {
-                starters.add(y * WIDTH);
-            }
-        }
+    searchLoop:
+    for (int startIndex : starters) {
+        if (visited[startIndex] == currentGeneration) continue;
 
-        int finalBridgeIndex = -1;
-        java.awt.Color targetColor = null;
-        int gapTolerance = 20; 
+        int startY = startIndex / WIDTH;
+        targetColor = gridColors[0][startY];
+        
+        Queue<Integer> queue = new LinkedList<>();
+        queue.add(startIndex);
+        visited[startIndex] = currentGeneration;
+        
+        // FIX: Explicitly set the root node's parent to -1 so the backtracking loop knows where to stop!
+        parentMap[startIndex] = -1; 
 
-        searchLoop:
-        for (int startIndex : starters) {
-            if (visited[startIndex]) continue;
-
-            int startY = startIndex / WIDTH;
-            targetColor = grid[0][startY].color;
-            
-            Queue<Integer> queue = new LinkedList<>();
-            queue.add(startIndex);
-            visited[startIndex] = true;
-
-            while (!queue.isEmpty()) {
-                int currIndex = queue.poll();
-                int cx = currIndex % WIDTH;
-                int cy = currIndex / WIDTH;
-
-                if (cx >= WIDTH - gapTolerance - 1) {
-                    finalBridgeIndex = currIndex;
-                    break searchLoop;
-                }
-
-                for (int ox = 1; ox <= gapTolerance; ox++) { // Start at 1 (always move right)
-                    for (int oy = -gapTolerance; oy <= gapTolerance; oy++) {
-                        int nx = cx + ox;
-                        int ny = cy + oy;
-
-                        if (nx >= 0 && nx < WIDTH && ny >= 0 && ny < HEIGHT) {
-                            int ni = nx + ny * WIDTH;
-                            Sand neighbor = grid[nx][ny];
-
-                            if (neighbor != null && !neighbor.slowFall && !visited[ni] && neighbor.color.equals(targetColor)) {
-                                visited[ni] = true;
-                                parentMap[ni] = currIndex;
-                                queue.add(ni);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (finalBridgeIndex == -1) return null;
-
-        List<Integer> fullBlob = new ArrayList<>();
-        Queue<Integer> expansionQueue = new LinkedList<>();
-
-        int trace = finalBridgeIndex;
-        while (trace != -1) {
-            expansionQueue.add(trace);
-            blobVisited[trace] = true;
-            trace = parentMap[trace];
-        }
-
-        while (!expansionQueue.isEmpty()) {
-            int currIndex = expansionQueue.poll();
-            fullBlob.add(currIndex);
-
+        while (!queue.isEmpty()) {
+            int currIndex = queue.poll();
             int cx = currIndex % WIDTH;
             int cy = currIndex / WIDTH;
 
-            for (int ox = -1; ox <= 1; ox++) {
-                for (int oy = -1; oy <= 1; oy++) {
-                    if (ox == 0 && oy == 0) continue;
+            if (cx >= WIDTH - gapTolerance - 1) {
+                finalBridgeIndex = currIndex;
+                break searchLoop;
+            }
+
+            for (int ox = 1; ox <= gapTolerance; ox++) { 
+                for (int oy = -gapTolerance; oy <= gapTolerance; oy++) {
                     int nx = cx + ox;
                     int ny = cy + oy;
 
                     if (nx >= 0 && nx < WIDTH && ny >= 0 && ny < HEIGHT) {
                         int ni = nx + ny * WIDTH;
-                        Sand neighbor = grid[nx][ny];
-
-                        if (neighbor != null && !neighbor.slowFall && !blobVisited[ni] && neighbor.color.equals(targetColor)) {
-                            blobVisited[ni] = true;
-                            expansionQueue.add(ni);
+                        
+                        if (gridColors[nx][ny] != 0 && !gridActive[nx][ny] 
+                            && visited[ni] != currentGeneration 
+                            && gridColors[nx][ny] == targetColor) {
+                            
+                            visited[ni] = currentGeneration;
+                            parentMap[ni] = currIndex;
+                            queue.add(ni);
                         }
                     }
                 }
             }
         }
-        return fullBlob;
     }
 
+    if (finalBridgeIndex == -1) return null;
+
+    List<Integer> fullBlob = new ArrayList<>();
+    Queue<Integer> expansionQueue = new LinkedList<>();
+
+    int trace = finalBridgeIndex;
+    // This loop will now safely terminate when it hits -1 instead of spinning forever on 0
+    while (trace != -1) {
+        expansionQueue.add(trace);
+        blobVisited[trace] = blobGeneration;
+        trace = parentMap[trace];
+    }
+
+    while (!expansionQueue.isEmpty()) {
+        int currIndex = expansionQueue.poll();
+        fullBlob.add(currIndex);
+
+        int cx = currIndex % WIDTH;
+        int cy = currIndex / WIDTH;
+
+        for (int ox = -1; ox <= 1; ox++) {
+            for (int oy = -1; oy <= 1; oy++) {
+                if (ox == 0 && oy == 0) continue;
+                int nx = cx + ox;
+                int ny = cy + oy;
+
+                if (nx >= 0 && nx < WIDTH && ny >= 0 && ny < HEIGHT) {
+                    int ni = nx + ny * WIDTH;
+
+                    if (gridColors[nx][ny] != 0 && !gridActive[nx][ny] 
+                        && blobVisited[ni] != blobGeneration 
+                        && gridColors[nx][ny] == targetColor) {
+                        
+                        blobVisited[ni] = blobGeneration;
+                        expansionQueue.add(ni);
+                    }
+                }
+            }
+        }
+    }
+    return fullBlob;
+}
     @Override
     public void dispose() {
         stage.dispose();
@@ -619,53 +650,40 @@ public class Main extends ApplicationAdapter {
         
         if (clickSound != null) clickSound.dispose();
         if (clearSound != null) clearSound.dispose();
-        if (gameoverSound != null) gameoverSound.dispose();
     }
+    
     private void rotateActivePiece() {
-        List<int[]> activeParticles = new ArrayList<>();
+        if (activeParticles.isEmpty()) return;
+        
         float minX = Float.MAX_VALUE, maxX = Float.MIN_VALUE;
         float minY = Float.MAX_VALUE, maxY = Float.MIN_VALUE;
 
-        // 1. Gather all falling particles and find their bounding box
-        for (int x = 0; x < WIDTH; x++) {
-            for (int y = 0; y < HEIGHT; y++) {
-                if (grid[x][y] != null && grid[x][y].slowFall) {
-                    activeParticles.add(new int[]{x, y});
-                    if (x < minX) minX = x;
-                    if (x > maxX) maxX = x;
-                    if (y < minY) minY = y;
-                    if (y > maxY) maxY = y;
-                }
-            }
+        for (int[] p : activeParticles) {
+            if (p[0] < minX) minX = p[0];
+            if (p[0] > maxX) maxX = p[0];
+            if (p[1] < minY) minY = p[1];
+            if (p[1] > maxY) maxY = p[1];
         }
 
-        if (activeParticles.isEmpty()) return;
-
-        // 2. Calculate the center pivot point
         float cx = (minX + maxX) / 2f;
         float cy = (minY + maxY) / 2f;
 
         List<int[]> newPositions = new ArrayList<>();
         boolean blocked = false;
 
-        // 3. Calculate new rotated coordinates
         for (int[] p : activeParticles) {
-            // Find position relative to the center
             float rx = p[0] - cx;
             float ry = p[1] - cy;
 
-            // Apply 90-degree clockwise rotation math
             int newX = Math.round(cx + ry);
             int newY = Math.round(cy - rx);
 
-            // Check bounds (don't rotate out of the screen)
             if (newX < 0 || newX >= WIDTH || newY < 0 || newY >= HEIGHT) {
                 blocked = true; 
                 break;
             }
             
-            // Check collisions (don't rotate into settled sand)
-            if (grid[newX][newY] != null && !grid[newX][newY].slowFall) {
+            if (gridColors[newX][newY] != 0 && !gridActive[newX][newY]) {
                 blocked = true; 
                 break;
             }
@@ -673,22 +691,24 @@ public class Main extends ApplicationAdapter {
             newPositions.add(new int[]{newX, newY});
         }
 
-        if (blocked) return; // Abort rotation if it doesn't fit
+        if (blocked) return; 
 
-        // 4. Apply the rotation safely
-        Sand[] savedSand = new Sand[activeParticles.size()];
+        int[] savedColors = new int[activeParticles.size()];
         
-        // First, clear all old positions from the grid
         for (int i = 0; i < activeParticles.size(); i++) {
             int[] p = activeParticles.get(i);
-            savedSand[i] = grid[p[0]][p[1]];
-            grid[p[0]][p[1]] = null; 
+            savedColors[i] = gridColors[p[0]][p[1]];
+            gridColors[p[0]][p[1]] = 0; 
+            gridActive[p[0]][p[1]] = false;
         }
 
-        // Then, stamp them into their new rotated positions
         for (int i = 0; i < newPositions.size(); i++) {
             int[] newP = newPositions.get(i);
-            grid[newP[0]][newP[1]] = savedSand[i]; 
+            gridColors[newP[0]][newP[1]] = savedColors[i]; 
+            gridActive[newP[0]][newP[1]] = true;
+            
+            activeParticles.get(i)[0] = newP[0];
+            activeParticles.get(i)[1] = newP[1];
         }
     }
 }
